@@ -1,0 +1,9 @@
+{
+  "name": "@dsh-android/dsh-host-web-compat",
+  "description": "Host plugin: inject legacy-browser polyfills (AbortSignal.any etc.) into every served index.html via the webserver index-tap hook. Fixes the in-app directory picker on older WebView/browser kernels.",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "private": true,
+  "dependencies": {}
+}

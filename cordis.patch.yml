@@ -1,0 +1,5 @@
+# dsh-android bundle 内挂载本插件（示意）：
+# - insert:
+#     - id: web-compat
+#       name: '@dsh-android/dsh-host-web-compat'
+#       disabled: !!js process.platform !== 'android'
