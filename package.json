@@ -8,5 +8,9 @@
     "lib/index.js"
   ],
   "private": true,
-  "dependencies": {}
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kelai141/dsh-host-web-compat.git"
+  }
 }
