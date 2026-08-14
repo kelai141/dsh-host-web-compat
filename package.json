@@ -1,6 +1,6 @@
 {
   "name": "@dsh-android/dsh-host-web-compat",
-  "description": "Host plugin: inject legacy-browser polyfills (AbortSignal.any etc.) into every served index.html via the webserver index-tap hook. Fixes the in-app directory picker on older WebView/browser kernels.",
+  "description": "Host plugin: legacy-browser polyfills + Android directory-picker bridge (SAF via WebView JS bridge) for the shell APK",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",
@@ -8,7 +8,9 @@
     "lib/index.js"
   ],
   "private": true,
-  "dependencies": {},
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/kelai141/dsh-host-web-compat.git"
