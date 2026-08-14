@@ -1,2 +1,4 @@
 node_modules/
-lib/
+lib/*.map
+# lib/index.js 即本仓库源码（无 src/ 目录），必须入库
+`n# 敏感数据`n*.credentials.yaml`ntoken*`n*.key`n*.pem`n*.p12
