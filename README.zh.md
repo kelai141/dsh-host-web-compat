@@ -1,6 +1,6 @@
 # dsh-host-web-compat
 
-> **dsh-mobile 生态** · [dsh-mobile-apk](https://github.com/kelai141/dsh-mobile-apk)（壳 APK）· [dsh-shell-termux](https://github.com/kelai141/dsh-shell-termux)（shell）· [dsh-client-ui-responsive](https://github.com/kelai141/dsh-client-ui-responsive)（移动 UI）· [dsh-mobile](https://github.com/kelai141/dsh-mobile)（协调仓库，private）
+> **DeepSeek Harness × Android 生态** · [dsh-mobile-apk](https://github.com/kelai141/dsh-mobile-apk)（壳 APK）· [dsh-shell-termux](https://github.com/kelai141/dsh-shell-termux)（shell）· [dsh-client-ui-responsive](https://github.com/kelai141/dsh-client-ui-responsive)（移动 UI）
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 宿主插件：通过 webserver `tapIndex`
 钩子向每个页面注入旧内核浏览器缺失的 polyfill，修复老 WebView 上目录选择器等 RPC 流程。
