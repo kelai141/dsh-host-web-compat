@@ -1,5 +1,7 @@
 # dsh-host-web-compat
 
+[🌐 中文说明 / 中文 README](README.zh.md)
+
 > **DeepSeek Harness × Android 生态** · [dsh-mobile-apk](https://github.com/kelai141/dsh-mobile-apk)（壳 APK）· [dsh-shell-termux](https://github.com/kelai141/dsh-shell-termux)（shell）· [dsh-client-ui-responsive](https://github.com/kelai141/dsh-client-ui-responsive)（移动 UI）
 
 Host plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that injects
