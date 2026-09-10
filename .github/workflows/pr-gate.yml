@@ -1,4 +1,4 @@
-# PR Gate — dsh-host-web-compat: syntax check + conflict-marker scan (pure JS plugin, no build)
+# PR Gate — dsh-host-web-compat: syntax check + injection smoke + conflict-marker scan (pure JS plugin, no build)
 name: PR Gate
 
 on:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   check:
-    name: node --check + 扫描
+    name: node --check + 注入冒烟 + 扫描
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +17,13 @@ jobs:
           node-version: '22'
       - name: JS 语法检查
         run: node --check lib/index.js
+      - name: 注入冒烟（装配 + 逐段解析 + 页面标记）
+        # 2026-09-10 定例：片段拼成一个 <script>，一个语法错误会让整块 polyfill 静默失效，
+        # 文本 grep 抓不到——必须真装配、真解析（历史缺陷：Set 片段 })() 撞下一段 if (）。
+        run: node scripts/smoke-injections.mjs
       - name: 冲突标记检查
         run: |
-          if grep -rEn '^(<<<<<<< |>>>>>>> )' lib --include='*.js'; then
+          if grep -rEn '^(<<<<<<< |>>>>>>> )' lib scripts --include='*.js' --include='*.mjs'; then
             echo "::error::检测到未解决的 merge conflict 标记"
             exit 1
           fi
