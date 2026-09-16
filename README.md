@@ -58,10 +58,11 @@ one must end on a complete statement (see Development constraints).
 
 - Directory-picker bridge (`__dshBridge` plus the `/api/android/dir-pick/*` polling endpoints that
   return real SAF paths);
-- open-path (`window.__dshOpenPath`: chat mentions and tool-row paths into the shell chooser);
+- open-path (`window.__dshOpenPath`: chat mentions and tool-row paths into the shell chooser) —
+  0.14 makes resolution session-scoped (relative paths resolve against the active session cwd);
 - theme bridge (`__dshThemeBridge`: system light/dark into page theme variables);
-- agent tool-row path recognition (clicking an absolute path in a tool row hands it to the shell
-  chooser);
+- agent tool-row path recognition — 0.14 keys on DOM facts (not CSS-module class names) when
+  clicking an absolute path in a tool row hands it to the shell chooser;
 - boot watchdog (diagnostics plus one automatic reload when "Loading plugins" persists past 40s).
 
 ## Development constraints
