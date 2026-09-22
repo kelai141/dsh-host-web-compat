@@ -364,3 +364,152 @@ test('§2.3 占位哨兵常量与容器标记逐字一致（F6）', () => {
   assert.ok(SRC.includes("const STATIC_FALLBACK_MARK = 'id=\"dsh-static-fallback\"'"), '哨兵常量必须逐字对应容器标记')
   assert.ok(SRC.includes('id="dsh-static-fallback"'), '容器标记必须在场')
 })
+
+// ── D4（0.14.1 白闪，issue #242）行为回归 ─────────────────────────────────────────────
+//
+// 上面 §2.3 那组用例是**静态文本在场**判据（assert SRC.includes(...)）：它们能证明「源码里有这一行」，
+// 证不了「健康启动时占位不会现身」。这正是本缺陷漏网的机制——块C 的验收写的是「成功后占位被移除」
+// （一个**终态**断言），而用户看到的是**过程**：录屏抽帧实测 0.37s 内，占位带（#1d1d1d）与整屏
+// 纯白（255,255,255）**同帧**出现，随后页面自己渲染好、占位被移除 —— 终态断言全绿。
+//
+// 故这里补**行为对照**：把注入脚本放进 vm，用可控定时器分别跑「健康启动」「一直不渲染」两个场景，
+// 并在最后给出旧形态的反向对照（没有它，无法区分新旧行为，用例等于没写）。
+
+/** 取出 STATIC_FALLBACK_SCRIPT 求值后的**内联脚本体**（真源码，非副本）。 */
+function staticFallbackEval() {
+  const tplStart = SRC.indexOf('const STATIC_FALLBACK_SCRIPT = `')
+  assert.ok(tplStart > 0, 'lib/index.js 必须定义 STATIC_FALLBACK_SCRIPT')
+  const closeTick = SRC.indexOf('`;', tplStart)
+  assert.ok(closeTick > tplStart, '必须能定位 STATIC_FALLBACK_SCRIPT 模板串闭合')
+  return new Function(SRC.slice(tplStart, closeTick + 2) + '; return STATIC_FALLBACK_SCRIPT')()
+}
+
+/** 取出 THEME_BRIDGE_SCRIPT 求值后的**内联脚本体**。 */
+function themeBridgeEval() {
+  const tplStart = SRC.indexOf('const THEME_BRIDGE_SCRIPT = `')
+  assert.ok(tplStart > 0, 'lib/index.js 必须定义 THEME_BRIDGE_SCRIPT')
+  const closeTick = SRC.indexOf('`;', tplStart)
+  assert.ok(closeTick > tplStart, '必须能定位 THEME_BRIDGE_SCRIPT 模板串闭合')
+  return new Function(SRC.slice(tplStart, closeTick + 2) + '; return THEME_BRIDGE_SCRIPT')()
+}
+
+const FALLBACK_HTML = staticFallbackEval()
+const FALLBACK_BODY = /<script>([\s\S]*)<\/script>/.exec(FALLBACK_HTML)?.[1]
+assert.ok(typeof FALLBACK_BODY === 'string' && FALLBACK_BODY.includes('clearStaticFallback'),
+  '必须能取出静态占位的脚本体')
+
+/**
+ * 在 vm 里跑一段注入脚本，返回可观测状态与可控定时器。
+ *
+ * @param body 脚本体（`(function(){...})()` 形态）。
+ * @param scene.rendered 是否已渲染（#root 是否有子节点）。
+ * @param scene.sysDark  `androidBridge.getSystemDark()` 的返回值；null = 该桥不可用。
+ */
+function runInjected(body, scene) {
+  const el = { style: {} }
+  const state = { removed: false, consoleLines: [] }
+  const doc = {
+    documentElement: { style: {} },
+    body: { textContent: '' },
+    getElementById: (id) => {
+      if (id === 'root') return { children: scene.rendered ? [{}] : [] }
+      if (id === 'dsh-static-fallback') return el
+      return null
+    },
+    addEventListener: () => {},
+  }
+  el.parentNode = { removeChild: () => { state.removed = true; el.parentNode = null } }
+  const timers = []
+  const windowObj = {
+    matchMedia: (q) => ({ matches: false, media: q, addEventListener: () => {}, removeEventListener: () => {} }),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+  if (scene.sysDark !== null) windowObj.androidBridge = { getSystemDark: () => !!scene.sysDark }
+  const sandbox = {
+    document: doc,
+    window: windowObj,
+    console: { error: (...a) => state.consoleLines.push(a.join(' ')) },
+    Date,
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    setInterval: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+  }
+  const sandboxCtx = createContext(sandbox)
+  runInContext(body, sandboxCtx)
+  return {
+    el,
+    doc,
+    window: sandbox.window,
+    state,
+    timers,
+    /** 触发所有 ms <= at 的定时器各一次（按注册顺序；interval 按「跑一轮」语义）。 */
+    fireTimers: (at) => { for (const t of timers.slice()) if (t.ms <= at) t.fn() },
+  }
+}
+
+const isVisibleByDefault = (inlineStyle) => !/visibility\s*:\s*hidden/.test(inlineStyle)
+const divStyleOf = (tpl) => /<div id="dsh-static-fallback" style="([^"]*)"/.exec(tpl)?.[1] ?? ''
+
+test('D4/F1：深色系统下，脚本求值即设深色文档底色（不等入口 chunk 绘制）', () => {
+  const r = runInjected(themeBridgeEval().replace(/^<script>/, '').replace(/<\/script>$/, ''), { sysDark: true, rendered: false })
+  assert.equal(String(r.doc.documentElement.style.background).toUpperCase(), '#1E1E1E',
+    '深色系统必须在 head 解析期就把文档画布写成深色，否则第一帧是 Chromium 默认白（白闪本体）')
+  assert.equal(r.doc.documentElement.style.colorScheme, 'dark', '必须同时声明 color-scheme，供 UA 决定滚动条等默认外观')
+})
+
+test('D4/F1：浅色系统下写浅色底（不是无脑写深色）', () => {
+  const r = runInjected(themeBridgeEval().replace(/^<script>/, '').replace(/<\/script>$/, ''), { sysDark: false, rendered: false })
+  assert.equal(String(r.doc.documentElement.style.background).toUpperCase(), '#F1F3F1')
+  assert.equal(r.doc.documentElement.style.colorScheme, 'light')
+})
+
+test('D4/F1：系统主题后续变化时画布底色跟随（不留 stale 内联底色）', () => {
+  const r = runInjected(themeBridgeEval().replace(/^<script>/, '').replace(/<\/script>$/, ''), { sysDark: true, rendered: false })
+  r.window.__dshThemeBridge.setDark(false)
+  assert.equal(String(r.doc.documentElement.style.background).toUpperCase(), '#F1F3F1',
+    '壳侧异步推送的主题变化必须同步画布底色，否则切到浅色主题后画布仍是深色')
+})
+
+test('D4/F2：健康启动时占位**始终不可见**，渲染后移除（缺陷本体）', () => {
+  const r = runInjected(FALLBACK_BODY, { rendered: true })
+  // 注入后、任何定时器之前：可见性只能来自内联样式，不得是 visible
+  assert.notEqual(r.el.style.visibility, 'visible',
+    '注入即在屏上 = 把失败文案当启动画面（旧行为；设备录屏里它与纯白同帧出现 0.37s）')
+  r.fireTimers(1000)
+  assert.equal(r.state.removed, true, '渲染成功后必须移除占位节点（不变量 2 的后半句）')
+  assert.notEqual(r.el.style.visibility, 'visible', '健康启动全程都不得现身')
+})
+
+test('D4/F2：一直不渲染时，阈值内不现身、超时后现身；不会误删', () => {
+  const r = runInjected(FALLBACK_BODY, { rendered: false })
+  r.fireTimers(1000)
+  assert.notEqual(r.el.style.visibility, 'visible',
+    '阈值内不得现身——「注入即可见」正是本次白闪/误报的成因（把健康启动渲染成失败）')
+  assert.equal(r.state.removed, false, '未渲染不得移除占位')
+  r.fireTimers(3000)
+  assert.equal(r.el.style.visibility, 'visible',
+    '确实卡住时必须现身，否则入口 chunk 全灭时用户得不到任何反馈（该块存在的理由）')
+})
+
+test('D4/F2：现身时必须落一条可诊断行（壳侧 boot-diag.log 按前缀抓）', () => {
+  const r = runInjected(FALLBACK_BODY, { rendered: false })
+  r.fireTimers(3000)
+  const hit = r.state.consoleLines.find((l) => l.includes('[dsh-boot-stall]') && l.includes('source=page-static-fallback'))
+  assert.ok(hit, '现身必须落可诊断行（否则「占位为何现身」现场无从判断）：' + JSON.stringify(r.state.consoleLines))
+  assert.ok(hit.includes('no-render-after-'), '原因必须写清是「超时未渲染」，不得只写一句失败')
+})
+
+test('D4/F2：阈值必须显著大于健康启动的渲染窗口（实测 0.37s），否则误报', () => {
+  const ms = Number(/var SHOW_DELAY_MS=(\d+);/.exec(FALLBACK_BODY)?.[1])
+  assert.ok(Number.isFinite(ms), '脚本体必须声明 SHOW_DELAY_MS（阈值只允许有一处）')
+  assert.ok(ms >= 2000, '阈值过小会把健康但稍慢的启动误报成失败：' + ms + 'ms')
+})
+
+test('D4/F2 反向对照：旧形态的容器默认可见，新形态默认隐藏（无此对照则新旧无法区分）', () => {
+  // 改动前的内联样式（逐字形态：没有 visibility 声明）
+  const OLD_STYLE = 'position:fixed;z-index:2147483646;left:0;right:0;top:0;padding:12px 14px;background:#1e1e1e;color:#e8e8e8;font:13px/1.5 sans-serif'
+  assert.equal(isVisibleByDefault(OLD_STYLE), true,
+    '旧形态：CSS 默认 visible，节点一进 DOM 就在屏上——这就是「健康启动也显示失败文案」的机制')
+  assert.equal(isVisibleByDefault(divStyleOf(FALLBACK_HTML)), false,
+    '新形态：容器必须默认隐藏，可见性只由脚本在「确实卡住」时打开')
+})
