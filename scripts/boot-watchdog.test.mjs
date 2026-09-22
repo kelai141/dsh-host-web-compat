@@ -228,6 +228,44 @@ test('注入脚本本体必须语法有效（注释里的反引号会提前截�
     'BOOT_WATCHDOG_SCRIPT 模板串内部不得出现反引号（会提前闭合模板、注入脚本变半截）')
 })
 
+test('S3-22 目录选择轮询：页面隐藏即停、可见即续（旧实现后台仍每 500ms 打一次）', async () => {
+  // 缺陷现场（审查档 §3.3 第 22 行）：PICKER_SCRIPT 的 poll() 无条件 `setTimeout(poll,500)`——
+  // 应用切到后台/锁屏后照样每 500ms 打一次 /api/android/dir-pick/poll，纯耗电与日志噪声。
+  // 判据取**求值后**的脚本体（源码切片测不出模板串语义），并在 VM 里跑出真实行为：
+  // 隐藏时不排下一拍、可见时立刻续上。
+  const tplStart = SRC.indexOf('const PICKER_SCRIPT = `')
+  assert.ok(tplStart > 0, '必须能定位 PICKER_SCRIPT')
+  const closeTick = SRC.indexOf('</scr` + `ipt>`;', tplStart)
+  assert.ok(closeTick > tplStart, '必须能定位 PICKER_SCRIPT 模板串闭合')
+  const evaluated = new Function(SRC.slice(tplStart, closeTick) + '`; return PICKER_SCRIPT')()
+  const inner = evaluated.replace(/^<script>/, '').replace(/<\/script>$/, '')
+
+  const timers = []
+  let visibilityListener = null
+  let fetches = 0
+  const doc = {
+    hidden: true,
+    addEventListener: (type, fn) => { if (type === 'visibilitychange') visibilityListener = fn },
+    documentElement: { setAttribute: () => {}, removeAttribute: () => {} },
+  }
+  const win = { androidBridge: { getPickToken: () => 't', pickDirectory: () => {} } }
+  const ctx = createContext({
+    window: win, document: doc, fetch: () => { fetches++; return Promise.resolve({ json: () => Promise.resolve({}) }) },
+    setTimeout: (fn, ms) => { timers.push(ms); return timers.length }, Promise,
+  })
+  runInContext(inner, ctx)
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(timers.length, 0, '页面隐藏时不得再排下一拍（隐藏即停）')
+  assert.ok(fetches >= 1, '首拍仍会发一次请求（在途的一次不算违规）')
+
+  // 可见：立即续上（不留空窗）
+  doc.hidden = false
+  assert.ok(visibilityListener, '必须挂了 visibilitychange 监听')
+  visibilityListener()
+  assert.equal(timers.length, 1, '恢复可见必须立刻续排一拍')
+  assert.equal(timers[0], 500, '轮询间隔保持 500ms（行为不变，只加可见性门）')
+})
+
 test('注入脚本体内不得含字面量 </head> 或 </script>（会误导 tapIndex 的 replace 或提前闭合标签）', () => {
   // 【0.14.1 装机实测 P0】真因链（与上面的「反引号截断」是**同一族的第二个陷阱**，且更难发现）：
   //   1. `apply()` 有**两次** tapIndex，各自做 `html.replace('</head>', <注入块> + '</head>')`；
