@@ -63,6 +63,15 @@ one must end on a complete statement (see Development constraints).
 - theme bridge (`__dshThemeBridge`: system light/dark into page theme variables);
 - agent tool-row path recognition — 0.14 keys on DOM facts (not CSS-module class names) when
   clicking an absolute path in a tool row hands it to the shell chooser;
+- clipboard fallback (2026-10-03): a global wrapper over `navigator.clipboard.writeText`. Android
+  WebView denies the async Clipboard API (`NotAllowedError: Write permission denied`; WebView has no
+  permission prompt), and upstream `writeClipboard` returns false from its `catch` — it only falls
+  back to `execCommand('copy')` when the API is *absent* — so every copy button wrote nothing and
+  showed nothing. The wrapper falls back to the shell bridge `window.androidBridge.copyText`
+  (ClipboardManager), then to `execCommand('copy')`, and emits one plain-language notice when all
+  three fail. Patching the API instead of each caller covers CodeBlock / MessageIconActions /
+  TerminalBlock / HoverCard / user-questions / trajectory and third-party plugins, which all read
+  the API at click time;
 - boot watchdog (diagnostics plus one automatic reload when "Loading plugins" persists past 40s).
 
 ## Development constraints
