@@ -57,7 +57,29 @@
 - 打开路径（`window.__dshOpenPath`：聊天 mention 与工具行路径 → 壳侧系统选择器）；0.14 起解析按**会话作用域**（相对路径对活跃会话 cwd 解析）；
 - 主题桥（`__dshThemeBridge`：系统深浅色 → 页面主题变量）；
 - Agent 工具行文件路径识别；0.14 起按 **DOM 事实**（不再靠 CSS-Module 类名）识别工具行，点击绝对路径 → 交给壳侧选择器打开；
-- boot 看门狗（40s 仍停在 Loading plugins 时收集诊断 + 一次性自动重载）。
+- boot 看门狗：40s 卡住诊断，以及壳 APK **按字段位置**解析的三条契约行（`[dsh-boot-stall]` 卡住、
+  `[dsh-boot-ready]` 真渲染完成、`[dsh-boot-failed]` 客户端插件树装配失败）——见「启动诊断契约」。
+
+## 启动诊断契约
+
+看门狗走 `console.error` 通道。壳 APK 先按行首前缀命中，再**按位置**读后续字段，因此下面的字段序
+属于接口本身：
+
+| 行 | 含义 | 前缀之后的字段 |
+|---|---|---|
+| `[dsh-boot-stall] dsh-boot-diag source=page-stall ...` | 40s 未渲染 | `pageSideRuntime=<折叠 JSON> detail=<折叠 k=v>` |
+| `[dsh-boot-ready] dsh-boot-diag source=page-ready ...` | `#root` 已渲染**且**启动页已卸载 | `pageSideRuntime=<折叠 JSON>` |
+| `[dsh-boot-failed] dsh-boot-diag source=page-plugin-fail ...` | 客户端插件树装配失败 | `detail=reason=<首行，200 字符> takenMs=<毫秒> failedCount=<N> rendered=<bool>`、`failedIds=<逗号分隔或 ->`、`pageSideRuntime=<折叠 JSON，收尾>` |
+
+`failedIds` 只保留「像 loader entry id」的项（`/^[@A-Za-z0-9][@A-Za-z0-9._\/-]*$/`，长度不超过
+120），最多 8 项，无引号无空格；一项都读不出时写 `-`。它排在 `pageSideRuntime` **之前**：`fold`
+有 2048 字符截断，JSON 在最尾被截断就完全无法解析。
+
+就绪判据是 `rendered() && !bootPagePresent()`。客户端插件树失败时上游渲染的仍是启动页，`#root`
+照样有子节点，于是旧「只看 rendered()」的判据会把它报成已就绪：壳侧据此停掉 stall 计时，失败被彻底
+静音。失败行由两个幂等触发点发布——`MutationObserver` 回调（2s 去抖）与 `readyWatch` 每一拍
+（覆盖「失败页在观察器装上之前就已到终态」的竞态）。`pendingBoot()` 未改，因此失败页**刻意不**弹
+40s 浮层：它有 `[dsh-boot-failed]` 这条自己的出口。
 
 0.1.13（2026-09-10，0.13.7fx-1）退役：注入 composer 菜单的「引用本机文件」项（`data-dsh-file-pick`）
 与整条 `pickFilePath`/`onFilePicked` 桥管线。上游 0.1.5 自带 `@` 引用菜单
@@ -79,6 +101,7 @@
 
 ```sh
 node scripts/smoke-injections.mjs   # 装配 + 逐段解析 + 页面标记断言（无需安装依赖）
+node scripts/boot-watchdog.test.mjs # 看门狗行为：pendingBoot / ready / 失败契约行
 ```
 
 脚本用桩 cordis 真实装载插件、跑一次 `tapIndex` 变换，再对服务出去的 HTML 逐段解析——

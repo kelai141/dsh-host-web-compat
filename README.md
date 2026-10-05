@@ -63,7 +63,33 @@ one must end on a complete statement (see Development constraints).
 - theme bridge (`__dshThemeBridge`: system light/dark into page theme variables);
 - agent tool-row path recognition — 0.14 keys on DOM facts (not CSS-module class names) when
   clicking an absolute path in a tool row hands it to the shell chooser;
-- boot watchdog (diagnostics plus one automatic reload when "Loading plugins" persists past 40s).
+- boot watchdog: 40s stuck diagnostics plus the three contract lines the shell APK parses by
+  field position (`[dsh-boot-stall]` stuck, `[dsh-boot-ready]` really rendered,
+  `[dsh-boot-failed]` client plugin tree failed) — see Boot diagnostics contract.
+
+## Boot diagnostics contract
+
+The watchdog reports on the `console.error` channel. The shell APK matches the line prefix and then
+reads the remaining fields **by position**, so the field order below is part of the interface:
+
+| line | meaning | fields after the prefix |
+|---|---|---|
+| `[dsh-boot-stall] dsh-boot-diag source=page-stall ...` | 40s without a render | `pageSideRuntime=<folded JSON> detail=<folded k=v>` |
+| `[dsh-boot-ready] dsh-boot-diag source=page-ready ...` | `#root` rendered **and** the boot page is gone | `pageSideRuntime=<folded JSON>` |
+| `[dsh-boot-failed] dsh-boot-diag source=page-plugin-fail ...` | client plugin tree failed | `detail=reason=<first line, 200 chars> takenMs=<ms> failedCount=<N> rendered=<bool>`, `failedIds=<comma list or ->`, `pageSideRuntime=<folded JSON, last>` |
+
+`failedIds` keeps only items that look like a loader entry id
+(`/^[@A-Za-z0-9][@A-Za-z0-9._\/-]*$/`, at most 120 characters), at most 8 items, unquoted and
+space-free; `-` when none is readable. It sits **before** `pageSideRuntime` because `fold`
+truncates at 2048 characters and a truncated JSON tail cannot be parsed at all.
+
+Readiness is `rendered() && !bootPagePresent()`. A failed client plugin tree renders a boot page
+that still gives `#root` children, so the old `rendered()`-only criterion reported it as ready: the
+shell stopped its stall timer and the failure stayed silent. The failure line is published from two
+idempotent trigger points — the `MutationObserver` callback (2s debounce) and every `readyWatch`
+tick, which covers a failure page that reached its final state before the observer was installed.
+`pendingBoot()` is unchanged, so a failure page deliberately does **not** raise the 40s overlay: it
+exits through `[dsh-boot-failed]` instead.
 
 ## Development constraints
 
@@ -83,6 +109,7 @@ Snippets live in the `POLYFILLS` array; the assembly rule is `POLYFILL_SCRIPT_BO
 
 ```sh
 node scripts/smoke-injections.mjs   # assembly + per-script parse + page-marker assertions, no install needed
+node scripts/boot-watchdog.test.mjs # watchdog behaviour: pendingBoot / ready / failure contract line
 ```
 
 The script loads the real plugin against a stubbed cordis, runs one `tapIndex` transform, and parses
