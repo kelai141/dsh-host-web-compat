@@ -91,6 +91,12 @@ try {
     // 2026-10-03 复制按钮静默失效：wrapper 必须真的送达页面（上游 writeClipboard 只在 API **缺席**
     // 时才回落 execCommand，API 在场被拒时直接 return false——判据只能是「桥线在页面文本里」）。
     ['native clipboard fallback wrapper', 'androidBridge.copyText'],
+    // 客户端插件装配失败契约行（跨仓逐字，壳侧 LogCollector.PAGE_PLUGIN_FAIL_PREFIX 同源）：
+    // 页面侧这条脚本必须**真的送到页面**，否则失败自愈链在页面这一端就断了。
+    // 行格式/字段序的行为判据在 boot-watchdog.test.mjs（这里只锁「标记送达」）。
+    ['client plugin failure contract prefix', "var BOOT_FAILED_PREFIX='[dsh-boot-failed]';"],
+    ['boot page presence criterion (ready must exclude it)', 'function bootPagePresent()'],
+    ['client plugin failure publisher', 'function publishBootFailure()'],
   ]) check('served markup carries ' + label, html.includes(needle))
 
   // Behavioural proof for the shape of the Iterator shim: run the real polyfill script inside a

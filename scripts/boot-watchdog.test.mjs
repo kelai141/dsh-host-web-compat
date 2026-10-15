@@ -27,16 +27,13 @@ function watchdogBody() {
   assert.ok(start > 0, 'lib/index.js 必须定义 BOOT_WATCHDOG_SCRIPT')
   const end = SRC.indexOf('})()</script>`', start)
   assert.ok(end > start, 'BOOT_WATCHDOG_SCRIPT 必须能被完整取出')
-  const raw = SRC.slice(start + 'const BOOT_WATCHDOG_SCRIPT = `<script>'.length, end + '})()'.length)
-  // 单趟解转义（与 JS 模板串语义一致；该模板内无 ${} 插值，由 grep 语义约束保证）。
-  // 不能分多次 replace：`\\r` 会被后面的规则二次命中，解出错误字节（首版实测踩到）。
-  let out = ''
-  for (let i = 0; i < raw.length; i++) {
-    if (raw[i] !== '\\') { out += raw[i]; continue }
-    const next = raw[i + 1]
-    if (next === '\\') { out += '\\'; i++ } else if (next === 'r') { out += '\r'; i++ } else if (next === 'n') { out += '\n'; i++ } else if (next === 't') { out += '\t'; i++ } else { out += raw[i] }
-  }
-  return out
+  // 解转义必须用**引擎自己的语义**（模板字面量求值），不得手写解码表。
+  // 原因（真机实锤 2026-10-05：failedIds 恒为 "-"）：手写解码对**未知转义**的处理与 JS 不同——
+  // 模板字面量里 `\s` 会丢掉反斜杠变成 `s`，而手写表当年把反斜杠留了下来。
+  // 于是测试看到的是 `\s`（正确），页面拿到的是 `s`（退化），测试比引擎更宽容 —— 盲区就在这。
+  // 用 new Function 求值即与页面收到的字节完全一致（该模板内无 ${} 插值，见下方反引号判据）。
+  const evaluated = new Function(SRC.slice(start, end + '})()'.length) + '`; return BOOT_WATCHDOG_SCRIPT')()
+  return evaluated.replace(/^<script>/, '').replace(/<\/script>$/, '')
 }
 
 /** 朴素配对花括号截取一个函数定义。 */
@@ -550,4 +547,317 @@ test('D4/F2 反向对照：旧形态的容器默认可见，新形态默认隐�
     '旧形态：CSS 默认 visible，节点一进 DOM 就在屏上——这就是「健康启动也显示失败文案」的机制')
   assert.equal(isVisibleByDefault(divStyleOf(FALLBACK_HTML)), false,
     '新形态：容器必须默认隐藏，可见性只由脚本在「确实卡住」时打开')
+})
+
+// ── 客户端插件装配失败契约行（[dsh-boot-failed]）行为回归 ─────────────────────────────
+//
+// 缺陷现场：上游 assertEntriesActive 抛错 → BootPage.fail/failedItem 把失败集合渲染进**仍然在场的
+// 启动页**，而该页同样满足 rendered()（#root 有子节点）。旧 publishReady() 因此约 500ms 就报一条
+// [dsh-boot-ready]：壳侧据此把该 epoch 标为「已就绪」并停止 stall 计时，失败被静音；40s 浮层同样
+// 永不出现（rendered() 早退）。本组用例锁四件事：
+//   ① 失败页 → 发 [dsh-boot-failed] 契约行、**不发** ready；
+//   ② 健康渲染 → 发 ready、不发 fail；
+//   ③ 失败页不得被判 pending（不发 40s stall 浮层）;
+//   ④ 触发点两处（MutationObserver 回调 2s 去抖 + readyWatch 每拍）且幂等。
+//
+// 判据取**求值后**的脚本体（与上面 §2.3 同法）：源码切片测不出模板串语义，且失败行的字段序是
+// 壳侧按位置解析的契约，必须在真实执行下断字段顺序。
+const FAILED_PREFIX_DECL = /var BOOT_FAILED_PREFIX='[^']+';/.exec(BODY)?.[0]
+assert.ok(FAILED_PREFIX_DECL, 'BOOT_WATCHDOG_SCRIPT 必须声明 BOOT_FAILED_PREFIX（跨仓契约行前缀）')
+const T0_DECL = /var t0=Date\.now\(\);/.exec(BODY)?.[0]
+assert.ok(T0_DECL, 'BOOT_WATCHDOG_SCRIPT 必须声明脚本起点 t0（契约行 takenMs 的真源）')
+const READY_PREFIX_DECL = /var BOOT_READY_PREFIX='[^']+';/.exec(BODY)?.[0]
+assert.ok(READY_PREFIX_DECL, 'BOOT_WATCHDOG_SCRIPT 必须声明 BOOT_READY_PREFIX')
+const FAILURE_RUNTIME = [
+  FLOOR, PREFIX_DECL, READY_PREFIX_DECL, FAILED_PREFIX_DECL, T0_DECL, PROGRESS_DECL,
+  grabFunction(BODY, 'fold'), grabFunction(BODY, 'textLen'), grabFunction(BODY, 'rendered'),
+  grabFunction(BODY, 'pendingBoot'), grabFunction(BODY, 'collectRuntime'),
+  grabFunction(BODY, 'installProgressWatch'),
+  grabFunction(BODY, 'bootPagePresent'), grabFunction(BODY, 'bootFailed'), grabFunction(BODY, 'failedIds'),
+  grabFunction(BODY, 'reasonText'),
+  grabFunction(BODY, 'publishBootFailure'), grabFunction(BODY, 'publishReady'),
+].join('\n')
+
+/** 选择器匹配（只覆盖看门狗真正用到的四个选择器；其余一律不命中）。 */
+function selMatch(n, sel) {
+  if (sel === '[data-dsh-boot]') return n.boot === true
+  if (sel === '[class*=failedItem]') return String(n.className).includes('failedItem')
+  if (sel === '[data-dsh-frame]') return n.dshFrame === true
+  if (sel === 'main,[role="main"]') return n.main === true
+  return false
+}
+/** 深度优先收集（上游失败项挂在 report 之下，必须递归）。 */
+function findAll(list, sel) {
+  const out = []
+  for (const n of list) {
+    if (selMatch(n, sel)) out.push(n)
+    out.push(...findAll(n.children ?? [], sel))
+  }
+  return out
+}
+/** 取第一个命中者（含自身子树）。 */
+function findOne(list, sel) {
+  for (const n of list) {
+    if (selMatch(n, sel)) return n
+    const deep = findOne(n.children ?? [], sel)
+    if (deep) return deep
+  }
+  return null
+}
+/** 最小 DOM 节点：与上游 boot 页的失败投影结构同形。 */
+function node(spec = {}) {
+  const children = spec.children ?? []
+  return {
+    boot: !!spec.boot,
+    dshFrame: !!spec.dshFrame,
+    main: !!spec.main,
+    className: spec.className ?? '',
+    textContent: spec.text ?? '',
+    children,
+    // 用 this.children（而不是闭包里的初始数组）：用例会整体替换 children 来模拟 DOM 变更，
+    // 闭包写法会继续查旧数组，从而把「变更后仍判未失败」误报成实现缺陷（首版实测踩到）。
+    querySelector(sel) { return findOne(this.children, sel) },
+    querySelectorAll(sel) { return findAll(this.children, sel) },
+  }
+}
+/** 上游 BootPage.render 的失败页：boot 页 > card > report > div.failedItem*（逐条 id + 失败原文）。 */
+function failurePage(ids, reason) {
+  const items = ids.map((id) => node({ className: 'failedItem', text: id }))
+  if (reason !== undefined) items.push(node({ className: 'failedItem', text: reason }))
+  return node({ boot: true, children: [node({ className: 'card', children: [node({ className: 'report', children: items })] })] })
+}
+
+/**
+ * 在 vm 里跑「判据 + 两个发布点」，返回可调用的发布面与控制面。
+ * @param root #root 节点（可变 children，便于模拟 DOM 变更）。
+ * @param scene.mutationObserver 是否提供 MutationObserver 桩（缺省不提供 = 观察器装不上）。
+ */
+function bootFailureRuntime(root, scene = {}) {
+  const state = { timers: [], consoleLines: [], observerCallbacks: [] }
+  const document = {
+    body: { textContent: '', children: [] },
+    documentElement: {},
+    baseURI: 'http://localhost/',
+    getElementById: (id) => (id === 'root' ? root : null),
+    // 真实 document.querySelectorAll 会搜到 #root 的后代；桩里必须同样委托过去，
+    // 否则 collectRuntime().failedEntries 恒为空，无法与 failedIds 做交叉核对（真机取证口径）。
+    querySelector: (sel) => root.querySelector(sel),
+    querySelectorAll: (sel) => root.querySelectorAll(sel),
+  }
+  const sandbox = {
+    document,
+    window: {},
+    console: { error: (...a) => state.consoleLines.push(a.join(' ')), warn: () => {} },
+    Date,
+    setTimeout: (fn, ms) => { state.timers.push({ fn, ms }); return state.timers.length },
+    clearTimeout: () => {},
+  }
+  if (scene.mutationObserver) {
+    sandbox.MutationObserver = function (cb) {
+      state.observerCallbacks.push(cb)
+      this.observe = () => {}
+    }
+  }
+  const ctx = createContext(sandbox)
+  // runInContext 返回该表达式的**完成值**（即本处的对象），不要再调用一次。
+  const api = runInContext(
+    '(function(){' + FAILURE_RUNTIME + '\nreturn {ready:publishReady,fail:publishBootFailure,pending:pendingBoot,'
+      + 'bootFailed:bootFailed,bootPagePresent:bootPagePresent,failedIds:failedIds,install:installProgressWatch}})()',
+    ctx,
+  )
+  return { api, state, window: sandbox.window, root }
+}
+const fireDebounce = (state) => { for (const t of state.timers.slice()) if (t.ms === 2000) t.fn() }
+const linesStarting = (state, prefix) => state.consoleLines.filter((l) => l.startsWith(prefix))
+
+test('失败页：bootFailed 命中、failedIds 按契约取值（形状过滤/≤8/去重/无引号）', () => {
+  const root = node({ children: [failurePage(
+    ['@dsh-android/dsh-host-web-compat', 'ui-sidebar-documentpreview', 'a'.repeat(121), 'dup', 'dup'],
+    'Failed to import loader entry ui-bad: SyntaxError unexpected token',
+  )] })
+  const { api } = bootFailureRuntime(root)
+  assert.equal(api.bootPagePresent(), true, '启动页仍在 #root 内（异常路径不得被当成已就绪）')
+  assert.equal(api.bootFailed(), true, '启动页 + 失败投影 = 终局失败')
+  // 跨 realm 数组的原型不同，deepStrictEqual 会误判；摊平回宿主 realm 再比。
+  assert.deepEqual([...api.failedIds()], ['@dsh-android/dsh-host-web-compat', 'ui-sidebar-documentpreview', 'dup'],
+    '只留像 loader entry id 的整项：失败原文（含空格/冒号）与超长项被滤掉，重复项只算一次')
+})
+
+test('失败页：发 [dsh-boot-failed] 契约行，且**不发** ready（字段序即契约）', () => {
+  const root = node({ children: [failurePage(['entry-one', 'entry-two'])] })
+  const { api, state, window } = bootFailureRuntime(root)
+  assert.equal(api.pending(), false,
+    '失败页不得被判 pending：它有自己的出口（契约行 → 壳侧回引导页），40s 浮层是刻意的另一条路')
+  api.fail()
+  api.ready()
+  assert.equal(linesStarting(state, '[dsh-boot-ready]').length, 0, '失败页不得发 ready（本次双重静音的根源）')
+  assert.equal(window.__dshBootReadyPublished, undefined, '失败页不得置 ready 标记')
+  const fails = linesStarting(state, '[dsh-boot-failed] ')
+  assert.equal(fails.length, 1, '失败行必须恰好发布一次')
+  const line = fails[0]
+  assert.match(line, /^\[dsh-boot-failed\] dsh-boot-diag source=page-plugin-fail detail=/,
+    '行首前缀与 source 必须逐字符合契约（壳侧按行首前缀判定）')
+  // 字段序：detail → failedIds → pageSideRuntime（收尾）
+  const atDetail = line.indexOf(' detail=')
+  const atIds = line.indexOf(' failedIds=')
+  const atRuntime = line.indexOf(' pageSideRuntime=')
+  assert.ok(atDetail > 0 && atIds > atDetail && atRuntime > atIds, '字段序必须为 detail → failedIds → pageSideRuntime')
+  assert.equal(line.includes(' failedIds=', atIds + 1), false, 'failedIds 只允许出现一列（其后即 runtime）')
+  assert.match(line.slice(atDetail, atIds), /reason=.+ takenMs=\d+ failedCount=2 rendered=true/, 'detail 必须带四个 k=v')
+  assert.equal(line.slice(atIds + ' failedIds='.length, atRuntime), 'entry-one,entry-two',
+    'failedIds 无引号无空格，逗号分隔')
+  // pageSideRuntime 必须**收尾且可解析**：fold 的 2048 截断落在它身上即整条诊断报废
+  const runtime = JSON.parse(line.slice(atRuntime + ' pageSideRuntime='.length))
+  assert.equal(runtime.pendingEntries, 'unavailable', 'pageSideRuntime 必须保留 collectRuntime 的诚实口径')
+  assert.equal(line.includes('\n'), false, '契约行必须单行')
+  assert.equal(line.includes('\r'), false, 'CR 也必须折叠')
+  // 幂等：同一文档再触发不发第二条，也不覆盖已发布的行
+  api.fail()
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 1, 'publishBootFailure 必须幂等')
+})
+
+test('失败页 entry id 全不可辨时 failedIds 写 "-"（壳侧据此走整份回滚或如实拒绝）', () => {
+  const root = node({ children: [failurePage([], 'TypeError: Cannot read properties of undefined')] })
+  const { api, state } = bootFailureRuntime(root)
+  api.fail()
+  assert.deepEqual([...api.failedIds()], [], '失败原文不是 entry id，不得被当成 id 上报')
+  assert.match(linesStarting(state, '[dsh-boot-failed] ')[0], / failedIds=- pageSideRuntime=/,
+    '一项都没有时必须写 "-"（不是空串，也不是空数组）')
+})
+
+test('健康渲染：发 ready、不发 fail（新判据不得把正常启动判成失败）', () => {
+  const root = node({ children: [node({ main: true, text: 'x'.repeat(200), className: 'app' })] })
+  const { api, state, window } = bootFailureRuntime(root)
+  assert.equal(api.bootPagePresent(), false, '健康渲染后启动页已被卸载')
+  assert.equal(api.bootFailed(), false, '无失败投影')
+  api.fail()
+  api.ready()
+  api.ready()
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 0, '健康渲染不得发失败行')
+  assert.equal(linesStarting(state, '[dsh-boot-ready] ').length, 1, '健康渲染必须且只发一次 ready')
+  assert.equal(window.__dshBootReadyPublished, true)
+})
+
+test('启动页仍在场但尚无失败投影：既不发 ready 也不发 fail（真就绪只认启动页已卸载）', () => {
+  const root = node({ children: [node({ boot: true, children: [node({ text: 'Loading plugins…' })] })] })
+  const { api, state } = bootFailureRuntime(root)
+  assert.equal(api.bootPagePresent(), true)
+  assert.equal(api.bootFailed(), false, '只有失败投影才算终局失败，单纯还在加载不算')
+  api.ready()
+  assert.equal(linesStarting(state, '[dsh-boot-ready] ').length, 0,
+    '启动页未卸载就报 ready 会把「加载中」误标成已就绪，正是本次要修的老行为')
+})
+
+test('触发点①：MutationObserver 回调 2s 去抖发布，且期间只排一个定时器', () => {
+  const root = node({ children: [node({ main: true, text: 'x'.repeat(200) })] })
+  const { api, state } = bootFailureRuntime(root, { mutationObserver: true })
+  api.install()
+  assert.equal(state.observerCallbacks.length, 1, '必须装上进度观察器（失败触发点挂在同一回调里）')
+  const tick = state.observerCallbacks[0]
+  tick()
+  assert.equal(state.timers.filter((t) => t.ms === 2000).length, 0, '健康树不得排失败去抖（零副作用）')
+  // DOM 变为失败页后，回调应排一次 2s 去抖
+  root.children = [failurePage(['entry-bad'])]
+  tick()
+  assert.equal(state.timers.filter((t) => t.ms === 2000).length, 1, '失败投影出现后必须排一次去抖')
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 0, '去抖窗口内不得提前发布')
+  tick()
+  assert.equal(state.timers.filter((t) => t.ms === 2000).length, 1, '去抖期内重复变更不得堆积定时器')
+  fireDebounce(state)
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 1, '去抖到点必须发布失败行')
+})
+
+test('触发点②：readyWatch 每拍补发，覆盖「观察器装上之前已是失败终态」的竞态', () => {
+  // 终态先于观察器存在：此时 MutationObserver 再也不会有回调，只有每拍补发能救。
+  const root = node({ children: [failurePage(['entry-late'])] })
+  const { api, state } = bootFailureRuntime(root, { mutationObserver: true })
+  api.install()
+  assert.equal(api.fail(), undefined)
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 1, '开始即终态也必须能发布（不依赖任何后续变更）')
+  api.fail()
+  api.fail()
+  assert.equal(linesStarting(state, '[dsh-boot-failed] ').length, 1, '每拍补发必须幂等')
+  assert.equal(linesStarting(state, '[dsh-boot-ready] ').length, 0, '失败终态下 readyWatch 不得改发 ready')
+})
+
+test('源码级契约：失败前缀常量与 publishReady 的新判据在场（缺一即返工）', () => {
+  assert.ok(BODY.includes("var BOOT_FAILED_PREFIX='[dsh-boot-failed]';"),
+    '页面侧常量必须与壳侧 PAGE_PLUGIN_FAIL_PREFIX 逐字一致')
+  assert.ok(BODY.includes('if(bootPagePresent())return;'),
+    'publishReady 必须排除启动页仍在场的分支（否则失败页照发 ready）')
+  assert.ok(BODY.includes('try{publishBootFailure()}catch(e){}'),
+    'readyWatch 每拍必须补发失败行（观察器装上前已是终态的竞态出口）')
+})
+
+
+// ── 模板串转义退化（真机实锤：failedIds 恒为 "-"，2026-10-05 MuMu 16416）────────────────
+//
+// 现场：契约行发布正确、reason 也取到终局原文，但 failedIds 恒为 "-"、failedCount=0，同一行里
+// pageSideRuntime.failedEntries 却明明带着 {"id":"@dsh-android/dsh-client-bad-probe"}。
+// 真因：BOOT_WATCHDOG_SCRIPT 是**模板字面量**，体内 `\s` 是未知转义 —— 反斜杠被吃掉，
+// 页面实际收到的是 `/s+/g`。于是 `@dsh-android/dsh-client-bad-probe` 被 replace(/s+/g,' ') 改写成
+// `@dh-android/dh-client-bad-probe`，不再匹配 ID_SHAPE，filter 全部 continue，返回空数组。
+// 这正是本文件 105-108 行注释里写下的那条坑（「\n 必须写成 \\n」），这次踩的是 \s。
+//
+// 判据必须取**求值后**的字节：源码切片看不出退化（源里就是单反斜杠，正是缺陷形态本身）。
+const TEMPLATE_NAMES = [
+  ['BOOT_WATCHDOG_SCRIPT', 'const BOOT_WATCHDOG_SCRIPT = `'],
+  ['THEME_BRIDGE_SCRIPT', 'const THEME_BRIDGE_SCRIPT = `'],
+  ['PICKER_SCRIPT', 'const PICKER_SCRIPT = `'],
+  ['STATIC_FALLBACK_SCRIPT', 'const STATIC_FALLBACK_SCRIPT = `'],
+]
+test('防回归 A（结构）：注入模板体内不得残留「单反斜杠+字母」的转义（真机踩过 \\s）', () => {
+  // 扫描对象是**模板体源码**（不是求值后文本）：求值后已看不出原始层数，无法定位到行。
+  // 判据：一个反斜杠 + 一个字母，且该反斜杠前面不是反斜杠。
+  // 白名单只放**合法的**十六进制转义（\uXXXX / \xXX）——PICKER_SCRIPT 的 \u300c 是上游既有且
+  // 工作正常的写法，一律判红会把「正确的代码」误报成缺陷（首版朴素正则正是这样误报的）。
+  const hazardOf = /(^|[^\\])\\([a-zA-Z])/g
+  const legalHex = /^(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})/
+  const found = []
+  for (const [name, marker] of TEMPLATE_NAMES) {
+    const s = SRC.indexOf(marker)
+    assert.ok(s > 0, name + ' 模板必须能被定位')
+    const c = SRC.indexOf('`;', s)
+    assert.ok(c > s, name + ' 模板串必须能被完整取出')
+    const body = SRC.slice(s + marker.length, c)
+    hazardOf.lastIndex = 0
+    let m
+    while ((m = hazardOf.exec(body)) !== null) {
+      if (legalHex.test(body.slice(m.index + m[0].length - m[2].length))) continue
+      found.push({ name, esc: m[2], ctx: body.slice(Math.max(0, m.index - 60), m.index + 40).replace(/\n/g, ' ') })
+    }
+  }
+  assert.deepEqual(found, [], '模板体内出现单反斜杠字母转义：反斜杠会被吞掉，页面拿到的是退化正则')
+    // 逐条打印上下文，便于直接定位（assert 消息里带不上多行）
+  if (found.length > 0) for (const h of found) console.error(h.name + ' esc=' + JSON.stringify(h.esc) + ' | ' + h.ctx)
+
+  // 求值后**必须**是页面真正要执行的正则（与上面源码判据互为表里：一个查层数，一个查结果）。
+  const pageText = new Function(SRC.slice(SRC.indexOf('const BOOT_WATCHDOG_SCRIPT = `'), SRC.indexOf('`;', SRC.indexOf('const BOOT_WATCHDOG_SCRIPT = `')) + 2) + '; return BOOT_WATCHDOG_SCRIPT')()
+  assert.equal(pageText.includes('.replace(/s+/g'), false, '页面不得收到退化后的 /s+/g')
+  assert.equal(pageText.includes('split(/n/)'), false, '页面不得收到退化后的 /n/')
+  assert.ok(pageText.includes('.replace(/\\s+/g'), '页面必须收到正确的空白折叠正则')
+})
+
+test('防回归 B（行为）：failedIds 必须从真实 DOM 读出 id 形状的失败项（真机 failedIds 恒为 "-" 的直接判据）', () => {
+  // 这条是**行为断言**，不是字段在场断言：现有用例只查了行里有 "failedIds="，
+  // 因此转义退化（值被 replace 改写成 @dh-android/... 后滤光）能一路全绿到真机。
+  // DOM 取自上游 BootPage.render() 的真实投影：标题 → 逐条 entry id → 终局原文。
+  const ID = '@dsh-android/dsh-client-bad-probe'
+  const REASON = 'web boot: 1 entry did not activate'
+  const root = node({ children: [failurePage([ID], REASON)] })
+  const { api, state } = bootFailureRuntime(root)
+  assert.deepEqual([...api.failedIds()], [ID],
+    'failedIds 必须从 DOM 读出该 id —— 取到空数组即转义退化（replace 用 /s+/g 把包名改写了）')
+  assert.equal(api.bootFailed(), true)
+  api.fail()
+  const line = linesStarting(state, '[dsh-boot-failed] ')[0]
+  assert.ok(line, '必须发布契约行')
+  assert.match(line, new RegExp(' failedIds=' + ID.replace(/[.\\/+*?^$()\\[\\]{}|]/g, '\\$&') + ' pageSideRuntime='),
+    'failedIds 必须是能从 DOM 读出的真实 id（真机此处为 "-"，即本用例要拦住的红）')
+  assert.ok(line.includes(' failedCount=1 '), 'failedCount 必须与 failedIds 一致（不得是 0）')
+  // 与真机取证同款的交叉核对：行内 failedIds 必须与 pageSideRuntime.failedEntries 的 id 对得上。
+  const runtime = JSON.parse(line.slice(line.indexOf(' pageSideRuntime=') + ' pageSideRuntime='.length))
+  assert.equal(runtime.failedEntries[0].id, ID, 'pageSideRuntime.failedEntries 与 failedIds 必须指向同一条')
+  // 反向：终局原文含空格，不得被当成 entry id 混进来
+  assert.equal(line.includes('failedIds=' + ID + ','), false, '含空格的终局原文不得被当作 id 追加')
 })
