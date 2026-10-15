@@ -505,6 +505,44 @@ test('D4/F1：系统主题后续变化时画布底色跟随（不留 stale 内�
     '壳侧异步推送的主题变化必须同步画布底色，否则切到浅色主题后画布仍是深色')
 })
 
+/** 手动主题归 presenter 所有，OS 桥只报告环境，不能把 UA scheme 改回系统色。 */
+function assertMountedThemeOwner(script, manualDark) {
+  const scene = { sysDark: !manualDark, rendered: false }
+  const r = runInjected(script.replace(/^<script>/, '').replace(/<\/script>$/, ''), scene)
+  scene.rendered = true
+  const scheme = manualDark ? 'dark' : 'light'
+  const background = manualDark ? '#151517' : '#ffffff'
+  r.doc.documentElement.style.colorScheme = scheme
+  r.doc.documentElement.style.background = background
+  const media = r.window.matchMedia('(prefers-color-scheme: dark)')
+  let changes = 0
+  media.addEventListener('change', () => { changes += 1 })
+  const registered = changes
+  for (const osDark of [manualDark, !manualDark]) {
+    r.window.__dshThemeBridge.setDark(osDark)
+    assert.equal(media.matches, osDark, '系统环境查询仍必须变化')
+    assert.equal(r.doc.documentElement.style.colorScheme, scheme, '不得覆盖手动主题的 UA scheme')
+    assert.equal(r.doc.documentElement.style.background, background, '不得覆盖 presenter 接管后的底色')
+  }
+  assert.equal(changes, registered + 2, 'system 偏好仍须收到两次 MQL 通知，由 presenter 解析')
+}
+
+test('主题所有权：挂载后手动浅色在系统来回切换时保持浅色', () => {
+  assertMountedThemeOwner(themeBridgeEval(), false)
+})
+
+test('主题所有权：挂载后手动深色在系统来回切换时保持深色', () => {
+  assertMountedThemeOwner(themeBridgeEval(), true)
+})
+
+test('主题所有权反证：移除挂载守卫时，原来的系统写回必须被判红', () => {
+  const current = themeBridgeEval()
+  const unguarded = current.replace('if(root&&root.children&&root.children.length>0)return;', '')
+  assert.notEqual(unguarded, current, '负控必须实际移除守卫')
+  assert.throws(() => assertMountedThemeOwner(unguarded, false), /不得覆盖/)
+  assert.throws(() => assertMountedThemeOwner(unguarded, true), /不得覆盖/)
+})
+
 test('D4/F2：健康启动时占位**始终不可见**，渲染后移除（缺陷本体）', () => {
   const r = runInjected(FALLBACK_BODY, { rendered: true })
   // 注入后、任何定时器之前：可见性只能来自内联样式，不得是 visible
